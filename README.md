@@ -5,12 +5,30 @@ configured properly, and prints a YES / NO / ERR report grouped into **Platform*
 **Group-level**, and **Org-level** checks.
 
 It follows the Snyk account model **Tenant → Group → Org**: it resolves one tenant
-(prompting if you can access several), then checks only the groups and orgs that
-belong to that tenant.
+(prompting if you can access several), then one group within that tenant (prompting
+if it has several), and checks only the orgs that belong to that group.
 
 The script is **safe to run against production** — every API call is a `GET`,
 nothing is created, modified, or deleted. It always exits `0` (it's a report, not a
 CI gate); a non-zero exit means the script itself failed to run.
+
+---
+
+## ⚠️ IMPORTANT — please read before relying on the results
+
+This script performs **surface-level checks only**. For org-level checks, a feature
+is reported as enabled (`YES`) when it is configured for **at least one** org within
+the selected Group — **it does not mean every org in the Group has that feature
+enabled**, and the result does **not** represent the full state of all orgs.
+
+The purpose of this report is to give a **general indication** of whether you have
+adopted certain recommended features, and that they are in use **to some extent**.
+It is a fast way to spot likely gaps so you can take **targeted action** and
+**accelerate the overall health-check process** — not a definitive audit.
+
+**At the end of the day, you must log in to your Snyk portal to identify and
+investigate the actual gaps** before drawing conclusions or making changes. Treat
+this output as a starting point, not the final word.
 
 ---
 
@@ -61,6 +79,7 @@ The script needs a token with Tenant Admin User that provides **group-level visi
 |---|---|---|
 | `SNYK_TOKEN` | **Yes** | API key or OAuth bearer token |
 | `SNYK_TENANT_ID` | No | Pre-select a tenant (skips the interactive prompt; required for non-interactive/CI runs when you can access more than one tenant) |
+| `SNYK_GROUP_ID` | No | Pre-select a group (skips the interactive prompt; required for non-interactive/CI runs when the tenant has more than one group) |
 | `SNYK_API_BASE` | No | API base URL. Defaults to `https://api.snyk.io` (US). Use your region's base otherwise |
 | `SNYK_DEBUG` | No | Set to `1` to print every non-200 API response (and per-check diagnostics) — useful when a check is unexpectedly NO/ERR |
 
@@ -87,7 +106,8 @@ uv run snyk_healthcheck.py
 ```
 
 `uv` resolves the inline dependencies and runs it. If you can access multiple
-tenants, you'll be prompted to pick one.
+tenants, you'll be prompted to pick one; then, if the tenant has more than one
+group, you'll be prompted to pick a group to check.
 
 ### Debug mode
 
@@ -156,10 +176,11 @@ uv run --offline snyk_healthcheck.py
   visibility.
 - You're pointed at the wrong region — set `SNYK_API_BASE` to your tenant's region.
 
-### Multiple tenants in a non-interactive shell
+### Multiple tenants or groups in a non-interactive shell
 
 If you can access more than one tenant and run in CI (no TTY), the script can't
-prompt. Set `SNYK_TENANT_ID` to choose one.
+prompt. Set `SNYK_TENANT_ID` to choose one. Likewise, if the selected tenant has
+more than one group, set `SNYK_GROUP_ID` to choose the group to check.
 
 ---
 
@@ -172,7 +193,15 @@ prompt. Set `SNYK_TENANT_ID` to choose one.
   - `YES` — the configuration item is present / enabled for at least one Group or Org
   - `NO` — not present / not enabled for all Groups or Org
   - `ERR` — the API call genuinely failedand response with Errors (auth, 4xx, 5xx, network) — not the same as NO
-- The **Detail** column names the orgs involved. To keep lines readable it lists up to **3 Orgs or Groups** per check (`+N more`); re-run with `SNYK_DEBUG=1` to see full data.
+- The **Detail** column names the orgs involved. To keep lines readable it lists up
+  to **3 Orgs or Groups** per check, followed by `+N more` when there are others.
+
+> **Note — the 3-org limit is display-only.** The names shown in the Detail column
+> are a readable sample, **not** the total. Every check still evaluates **all** orgs
+> in the selected group; the `YES` / `NO` / `ERR` status always reflects the full
+> set. The `+N more` suffix tells you how many additional orgs matched beyond the
+> three listed (e.g. `with PR checks: A, B, C +5 more` means **8** orgs qualified,
+> not 3).
 
 ---
 

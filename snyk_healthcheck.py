@@ -11,14 +11,16 @@ Snyk Platform Health Check
 Run with: uv run snyk_healthcheck.py
 
 Account model: Tenant → Group → Org. The script resolves one tenant
-(prompting if several are accessible), then checks only the groups and
-orgs that belong to that tenant.
+(prompting if several are accessible), then one group within that tenant
+(prompting if several exist), and checks only the orgs that belong to
+that group.
 
 Required env vars:
   SNYK_TOKEN     — API key or OAuth bearer token
 
 Optional:
   SNYK_TENANT_ID — pre-select a tenant (skips the prompt; useful for CI)
+  SNYK_GROUP_ID  — pre-select a group  (skips the prompt; useful for CI)
   SNYK_API_BASE  — defaults to https://api.snyk.io
   BROKER_URL     — if set, broker connectivity is checked
 """
@@ -101,6 +103,7 @@ SCAN_FRESHNESS_DAYS = 14
 
 TOKEN         = os.environ.get("SNYK_TOKEN", "")
 TENANT_ID_ENV = os.environ.get("SNYK_TENANT_ID", "")
+GROUP_ID_ENV  = os.environ.get("SNYK_GROUP_ID", "")
 API_BASE      = os.environ.get("SNYK_API_BASE", "https://api.snyk.io")
 BROKER_URL    = os.environ.get("BROKER_URL", "")
 DEBUG         = bool(os.environ.get("SNYK_DEBUG"))   # set to surface non-200 API responses
@@ -188,6 +191,38 @@ def select_tenant(tenants: dict[str, str]) -> tuple[str, str] | None:
         console.print(f"  [cyan]{i}[/cyan]. {tname} [dim]({tid})[/dim]")
     if not sys.stdin.isatty():
         console.print("[red]Non-interactive shell — set SNYK_TENANT_ID to choose a tenant.[/red]")
+        return None
+    while True:
+        try:
+            choice = input("Enter number: ").strip()
+        except EOFError:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(items):
+            return items[int(choice) - 1]
+        console.print("[red]Invalid selection — try again.[/red]")
+
+def select_group(groups: dict[str, str]) -> tuple[str, str] | None:
+    """Resolve the group to check within the selected tenant.
+
+    Env override wins; a single group is auto-selected; several prompt the user.
+    Returns (group_id, group_name) or None if it cannot be resolved.
+    """
+    if GROUP_ID_ENV:
+        if GROUP_ID_ENV in groups:
+            return GROUP_ID_ENV, groups[GROUP_ID_ENV]
+        console.print(f"[red]SNYK_GROUP_ID '{GROUP_ID_ENV}' is not among groups in this tenant.[/red]")
+        return None
+    if not groups:
+        return None
+    if len(groups) == 1:
+        return next(iter(groups.items()))
+
+    items = list(groups.items())
+    console.print("\n[bold]Multiple groups in tenant — select one:[/bold]")
+    for i, (gid, gname) in enumerate(items, 1):
+        console.print(f"  [cyan]{i}[/cyan]. {gname} [dim]({gid})[/dim]")
+    if not sys.stdin.isatty():
+        console.print("[red]Non-interactive shell — set SNYK_GROUP_ID to choose a group.[/red]")
         return None
     while True:
         try:
@@ -710,10 +745,10 @@ def _group_feature_check(name: str, groups: dict[str, str],
         else:
             failing.append(group_name)            # not enabled / available anywhere
     if failing:
-        return name, "NO", f"Not enabled in all orgs of Group: {', '.join(failing)}"
+        return name, "NO", f"Not enabled in Group level: {', '.join(failing)}"
     if errored:
         return name, "ERROR", f"API error querying: {', '.join(errored)}"
-    return name, "YES", f"Enabled in all reporting orgs of {enabled_groups} group(s)"
+    return name, "YES", f"Enabled in {enabled_groups} group level"
 
 def check_agent_fix(groups: dict[str, str], group_orgs: dict[str, dict[str, str]]) -> CheckResult:
     return _group_feature_check("Snyk Agent Fix", groups, group_orgs, _agent_fix_state)
@@ -828,19 +863,31 @@ def resolve_tenant() -> tuple[str, str]:
     console.print(f"  [dim]Using tenant:[/dim] [bold]{tenant_name}[/bold] [dim]({tenant_id})[/dim]")
     return tenant_id, tenant_name
 
+def resolve_group(tenant_id: str) -> tuple[str, str]:
+    """Resolve the group to check within the tenant, or exit if none can be determined."""
+    console.print("  [dim]Discovering groups in tenant...[/dim]")
+    groups = fetch_groups(tenant_id)
+    selected = select_group(groups)
+    if not selected:
+        console.print(
+            "[bold red]ERROR:[/bold red] Could not resolve a group. "
+            "Check the token's permissions, or set SNYK_GROUP_ID."
+        )
+        sys.exit(1)
+    group_id, group_name = selected
+    console.print(f"  [dim]Using group:[/dim] [bold]{group_name}[/bold] [dim]({group_id})[/dim]")
+    return group_id, group_name
+
 # A report section: (section_title, [CheckResult, ...])
 Section = tuple[str, list[CheckResult]]
 
-def run_all_checks(tenant_id: str) -> list[Section]:
+def run_all_checks(groups: dict[str, str]) -> list[Section]:
     # ── Platform ────────────────────────────────────────────────────────────────
     console.print("  [dim]Checking platform connectivity...[/dim]")
     platform = [check_api_reachability()]
 
-    # ── Discovery (Tenant → Group → Org) ──────────────────────────────────────────
-    console.print("  [dim]Discovering groups in tenant...[/dim]")
-    groups = fetch_groups(tenant_id)
-
-    console.print("  [dim]Discovering orgs across all groups...[/dim]")
+    # ── Discovery (orgs in the selected group) ────────────────────────────────────
+    console.print("  [dim]Discovering orgs in group...[/dim]")
     group_orgs: dict[str, dict[str, str]] = {}
     orgs: dict[str, str] = {}
     for group_id in groups:
@@ -961,5 +1008,6 @@ def print_report(sections: list[Section], tenant_label: str) -> None:
 
 if __name__ == "__main__":
     tenant_id, tenant_name = resolve_tenant()
-    sections = run_all_checks(tenant_id)
-    print_report(sections, f"{tenant_name} ({tenant_id})")
+    group_id, group_name = resolve_group(tenant_id)
+    sections = run_all_checks({group_id: group_name})
+    print_report(sections, f"{tenant_name} ({tenant_id}) / {group_name} ({group_id})")
