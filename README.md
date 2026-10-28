@@ -149,6 +149,10 @@ export UV_NATIVE_TLS=1
 uv run --native-tls snyk_healthcheck.py
 ```
 
+Newer `uv` releases deprecate `--native-tls` in favour of `--system-certs`; use that
+flag if you see the deprecation warning. It also needs `SSL_CERT_FILE` pointing at the
+exported CA bundle (above) when your proxy CA isn't in the system trust store.
+
 You can make native TLS the default for the session so you don't have to pass the
 flag each time:
 ```bash
@@ -169,6 +173,33 @@ Once the dependencies have been downloaded once, you can skip the network entire
 ```bash
 uv run --offline snyk_healthcheck.py
 ```
+
+### A feature shows `NO` / `N/A` but it is enabled in the Snyk portal
+
+Applies to **Snyk Agent Fix**, **OS Reachability**, **Snyk Secrets** and
+**Universal Broker for OS**. Agent Fix, Reachability and Secrets are read **per org**
+(there is no group-level endpoint for them); the Detail column says why:
+
+| Detail shows | Meaning |
+|---|---|
+| `on 37/40 orgs; off: OrgA, OrgB` | Genuinely off in those orgs. Group rollups need **every** org on. |
+| `flag not returned by API` / status `N/A` | The API answered but does not include the setting, so its state is unknown (not "off"). Verify in the portal. |
+| `HTTP 403 x40` / `HTTP 404 x40` | The call was refused or the endpoint isn't served to the token/tenant — **not** "off". |
+| `ERR` with `HTTP 5xx` | A real API failure — re-run. |
+
+Known API limitations (confirmed against the live API):
+
+- **Snyk Agent Fix** — `GET /orgs/{id}/settings/sast` returns only `sast_enabled`; the
+  `autofix_enabled` field is never returned at any API version, so the check reports `N/A`
+  unless Snyk starts returning it.
+- **OS Reachability / Snyk Secrets** — the published specs list these as beta-only, but the
+  live API serves them at the GA version and returns 404 for `~beta`. The script tries the GA
+  version first and falls back to `~beta`.
+- **Universal Broker for OS** — read from `GET /groups/{id}/settings/opensource/broker`
+  (`data.enabled`). It was confirmed to match the portal toggle for a group where it is off.
+
+For the raw per-org values, re-run with `SNYK_DEBUG=1`; each feature check then prints
+a line such as `DEBUG os_reachability id=<org-id> HTTP 200 -> True`.
 
 ### `Groups Configured` is ERR / no groups found
 
@@ -193,6 +224,12 @@ more than one group, set `SNYK_GROUP_ID` to choose the group to check.
   - `YES` — the configuration item is present / enabled for at least one Group or Org
   - `NO` — not present / not enabled for all Groups or Org
   - `ERR` — the API call genuinely failedand response with Errors (auth, 4xx, 5xx, network) — not the same as NO
+    A failed call is never reported as `NO`: if an org or group could not be read (for example HTTP 403
+    or 500), the row shows `ERR` and the Detail names the HTTP status, because an API failure is not
+    evidence that a setting is off.
+  - `N/A` — the setting **cannot be read from the Snyk API** (it is simply not returned), so the script
+    makes no claim either way. Check it in the Snyk portal. `N/A` rows are not counted as configured or
+    not configured in the overall score.
 - The **Detail** column names the orgs involved. To keep lines readable it lists up
   to **3 Orgs or Groups** per check, followed by `+N more` when there are others.
 
@@ -210,3 +247,19 @@ more than one group, set `SNYK_GROUP_ID` to choose the group to check.
 API endpoints and versions are defined as constants at the top of
 `snyk_healthcheck.py` (the `EP_*` paths and `REST_VERSION*` values). If Snyk changes
 a path or version, update it there — no other code changes are needed.
+
+**REST first.** The script uses the Snyk REST API wherever one exists, and falls back
+to V1 only where the API specs expose no REST equivalent. The V1 calls that remain
+are: org integrations, integration settings (PR checks / fix PRs / auto dependency
+upgrade / PR code and secrets tests), org ignore settings, org notification
+settings, and org entitlements. When Snyk adds REST equivalents, switch these over.
+
+**Pagination.** REST list endpoints return only 10 items per page by default. The
+script requests 100 per page and follows every `links.next` page, so tenants, groups,
+orgs, service accounts and projects are never silently truncated.
+
+**Scan freshness.** Only Open Source and Code (SAST) projects are assessed. Container, IaC and
+Snyk Secrets projects are excluded (`EXCLUDED_SCAN_TYPES` in the script), and deactivated projects
+(`status: inactive`) are skipped since they are intentionally not scanned; the Detail column notes
+how many were skipped. The stale/fresh decision was checked against Snyk's own `lastTestedDate`
+on a live tenant and agreed on every sampled project.
